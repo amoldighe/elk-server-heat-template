@@ -1,0 +1,221 @@
+heat_template_version: 2013-05-23
+
+description: HOT template for ELK Server installation on a instance with boot from volume along with setup of the necessary security group. 
+
+parameters:
+  key_name:
+    type: string
+    label: key_name
+    description: Name of key-pair to be used for the ELK node
+ 
+  image_id:
+        type: string
+        description: Image id
+  
+  flavor:
+    type: string
+    label: Flavor
+    description: Type of instance
+    default: m1.small
+
+  public_net:
+    type: string
+    description: public network id
+ 
+  internal_net:
+    type: string
+    description: internal network id
+
+  internal_subnet:
+    type: string
+    description: internal subnet id
+
+  instance_name:
+    type: string
+    description: name of instance
+
+  instance_vol_size:
+    type: string
+    default: 50
+
+resources:
+  elknode_port:
+        type: OS::Neutron::Port
+        properties:
+          network_id: { get_param: internal_net }
+          security_groups: [ get_resource: elknode_security_group ]
+          fixed_ips:
+            - subnet_id: { get_param: internal_subnet }
+
+  elknode_floating_ip:
+        type: OS::Neutron::FloatingIP
+        properties:
+          floating_network_id: { get_param: public_net }
+          port_id: { get_resource: elknode_port }
+
+  elknode_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 80
+          port_range_max: 80
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 22
+          port_range_max: 22
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 443
+          port_range_max: 443
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 5044
+          port_range_max: 5044
+
+  instance_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name: instance_vol1
+      size: { get_param: instance_vol_size }
+      image: {get_param: image_id }
+
+  ELKnode:
+        type: OS::Nova::Server
+        properties:
+          name: { get_param: instance_name }
+          block_device_mapping:
+          - device_name: vda
+            volume_id: { get_resource: instance_volume }
+            delete_on_termination: false
+          key_name: { get_param: key_name }
+          flavor: { get_param: flavor }
+          admin_user: ubuntu
+          networks:
+            - port: { get_resource: elknode_port }
+          user_data: |
+                #!/bin/sh -v
+                
+                export https_proxy="http://10.144.106.132:8678"
+                export http_proxy="http://10.144.106.132:8678"
+                add-apt-repository ppa:webupd8team/java -y 
+                apt-get update -y 
+                echo debconf shared/accepted-oracle-license-v1-1 select true | debconf-set-selections 
+                echo debconf shared/accepted-oracle-license-v1-1 seen true | debconf-set-selections 
+                apt-get install oracle-java8-installer -y
+                wget -qO - https://packages.elastic.co/GPG-KEY-elasticsearch | apt-key add -
+                echo "deb http://packages.elastic.co/elasticsearch/2.x/debian stable main" | tee -a /etc/apt/sources.list.d/elasticsearch-2.x.list
+
+                apt-get update
+                apt-get -y install elasticsearch
+                sed -i "/node\.name/a node.name: `hostname`" /etc/elasticsearch/elasticsearch.yml
+                local_ip=`ifconfig eth0 | grep "inet addr" | cut -d ':' -f 2 | awk '{print $1}'`
+                sed -i "/network\.host/a network.host: localhost" /etc/elasticsearch/elasticsearch.yml
+                service elasticsearch restart
+                update-rc.d elasticsearch defaults 95 10
+                
+                echo "deb http://packages.elastic.co/kibana/4.5/debian stable main"  | sudo tee -a /etc/apt/sources.list.d/kibana-4.5.list
+                apt-get update -y
+                apt-get -y install kibana
+                sed -i "/^# elasticsearch.url:/a elasticsearch.url: \"http://localhost:9200\"" /opt/kibana/config/kibana.yml
+                service kibana start
+                update-rc.d kibana defaults 96 9
+
+                apt-get install -y nginx apache2-utils
+                htpasswd -b -c /etc/nginx/htpasswd.users kibanaadmin kibana
+
+                cat >/etc/nginx/sites-available/default <<EOF
+                server {
+                listen 80;
+
+                server_name `hostname`;
+                
+                auth_basic "Restricted Access";
+                auth_basic_user_file /etc/nginx/htpasswd.users;
+
+                location / {
+                proxy_pass http://localhost:5601;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host \$host;
+                proxy_cache_bypass \$http_upgrade;
+                }
+                }
+                EOF
+
+                service nginx start
+                mkdir -p /etc/pki/tls/certs  /etc/pki/tls/private
+                sed -i "/\[ v3_ca \]/a subjectAltName = IP: $(echo $local_ip)" /etc/ssl/openssl.cnf
+                cd /etc/pki/tls
+                openssl req -config /etc/ssl/openssl.cnf -x509 -days 3650 -batch -nodes -newkey rsa:2048 -keyout private/logstash-forwarder.key -out certs/logstash-forwarder.crt
+                
+                echo "deb https://packages.elastic.co/logstash/2.3/debian stable main" | sudo tee -a /etc/apt/sources.list.d/logstash-2.3.list
+                apt-get update -y
+                apt-get install logstash -y
+                
+                cat > /etc/logstash/conf.d/02-beats-input.conf <<EOF
+                input {
+                beats {
+                port => 5044
+                ssl => true
+                ssl_certificate => "/etc/pki/tls/certs/logstash-forwarder.crt"
+                ssl_key => "/etc/pki/tls/private/logstash-forwarder.key"
+                }
+                }
+                EOF
+
+                cat > /etc/logstash/conf.d/10-syslog-filter.conf <<EOF
+                filter {
+                if [type] == "syslog" {
+                grok {
+                match => { "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}" }
+                add_field => [ "received_at", "%{@timestamp}" ]
+                add_field => [ "received_from", "%{host}" ]
+                }
+                syslog_pri { }
+                date {
+                match => [ "syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+                }
+                }
+                }
+                EOF
+
+                cat > /etc/logstash/conf.d/30-elasticsearch-output.conf <<EOF
+                output {
+                elasticsearch {
+                hosts => ["localhost:9200"]
+                sniffing => true
+                manage_template => false
+                index => "%{[@metadata][beat]}-%{+YYYY.MM.dd}"
+                document_type => "%{[@metadata][type]}"
+                }
+                }
+                EOF
+
+                service logstash restart
+                update-rc.d logstash defaults 96 9
+
+                curl -L -O https://download.elastic.co/beats/dashboards/beats-dashboards-1.2.3.zip
+                apt-get -y install unzip
+                unzip beats-dashboards-1.2.3.zip
+                cd beats-dashboards-1.2.3
+                unset http_proxy
+                unset https_proxy
+                ./load.sh
+
+                export https_proxy="http://10.144.106.132:8678"
+                export http_proxy="http://10.144.106.132:8678"
+                curl -O https://gist.githubusercontent.com/thisismitch/3429023e8438cc25b86c/raw/d8c479e2a1adcea8b1fe86570e42abab0f10f364/filebeat-index-template.json
+                curl -XPUT 'http://localhost:9200/_template/filebeat?pretty' -d@filebeat-index-template.json
+                
+                service nginx restart
+
+outputs:
+  ELKnode_private_ip:
+        description: Private IP address of elknode
+        value: { get_attr: [ ELKnode, first_address ] }
+  ELKnode_public_ip:
+        description: Floating IP address of elknode
+        value: { get_attr: [ elknode_floating_ip, floating_ip_address ] }
