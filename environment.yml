@@ -1,8 +1,8 @@
 parameters:
-  instance_name: elk-test1
-  key_name: CloudOperations
-  flavor: m1.medium
-  image_id: 5d963d95-cb52-4a36-9099-6bb101ebd308
-  public_net: ext-net
-  internal_net: 9bb84a87-4bc8-4b53-a043-05c03a3974cc
-  internal_subnet: e65dbe64-a07f-433c-a64b-871cf98512c5
+  instance_name: < enter instance name >
+  key_name: < enter login key name >
+  flavor: < enter flavor name >
+  image_name: < enter image name >
+  public_net: < enter public network name or id >
+  internal_net: < enter internal network name or id >
+  internal_subnet: < enter internal subnet name or id >

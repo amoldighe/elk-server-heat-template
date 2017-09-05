@@ -6,37 +6,42 @@ parameters:
   key_name:
     type: string
     label: key_name
-    description: Name of key-pair to be used for the ELK node
+    description: Name of key-pair to be used for the ELK server.
  
-  image_id:
+  image_name:
         type: string
-        description: Image id
+        description: Name or ID of the image being used.
   
   flavor:
     type: string
     label: Flavor
-    description: Type of instance
+    description: Specify the flavor of the instance.
     default: m1.small
 
   public_net:
     type: string
-    description: public network id
+    description: Public network name or ID.
  
   internal_net:
     type: string
-    description: internal network id
+    description: Internal network name or ID.
 
   internal_subnet:
     type: string
-    description: internal subnet id
+    description: Internal subnet name or ID.
 
   instance_name:
     type: string
-    description: name of instance
+    description: Name of the instance.
 
   instance_vol_size:
     type: string
     default: 50
+    description: Boot volume size for the instance.
+
+  proxy_url:
+    type: string
+    description: Specify the proxy URL, if the server does not have direct access to internet.
 
 resources:
   elknode_port:
@@ -79,7 +84,7 @@ resources:
     properties:
       name: instance_vol1
       size: { get_param: instance_vol_size }
-      image: {get_param: image_id }
+      image: {get_param: image_name }
 
   ELKnode:
         type: OS::Nova::Server
@@ -94,11 +99,15 @@ resources:
           admin_user: ubuntu
           networks:
             - port: { get_resource: elknode_port }
-          user_data: |
+          user_data:
+            str_replace:
+              params:
+                $PROXY: { get_param: proxy_url }
+              template: |
                 #!/bin/sh -v
                 
-                export https_proxy="http://10.144.106.132:8678"
-                export http_proxy="http://10.144.106.132:8678"
+                export https_proxy="$PROXY"
+                export http_proxy="$PROXY"
                 add-apt-repository ppa:webupd8team/java -y 
                 apt-get update -y 
                 echo debconf shared/accepted-oracle-license-v1-1 select true | debconf-set-selections 
@@ -205,8 +214,8 @@ resources:
                 unset https_proxy
                 ./load.sh
 
-                export https_proxy="http://10.144.106.132:8678"
-                export http_proxy="http://10.144.106.132:8678"
+                export https_proxy="$PROXY"
+                export http_proxy="$PROXY"
                 curl -O https://gist.githubusercontent.com/thisismitch/3429023e8438cc25b86c/raw/d8c479e2a1adcea8b1fe86570e42abab0f10f364/filebeat-index-template.json
                 curl -XPUT 'http://localhost:9200/_template/filebeat?pretty' -d@filebeat-index-template.json
                 
